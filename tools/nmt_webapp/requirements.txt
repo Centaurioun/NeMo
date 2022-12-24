@@ -1,3 +1,5 @@
 nemo_toolkit[all]>=1.0.0rc1
 flask
 flask_cors
+setuptools>=65.5.1 # not directly required, pinned by Snyk to avoid a vulnerability
+wheel>=0.38.0 # not directly required, pinned by Snyk to avoid a vulnerability
