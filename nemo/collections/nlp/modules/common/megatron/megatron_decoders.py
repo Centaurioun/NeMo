@@ -48,7 +48,6 @@ def get_decoder_model(
     kv_channels=None,
     init_method=None,
     scaled_init_method=None,
-    add_decoder=False,
     decoder_attn_mask_type=AttnMaskType.causal,
     pre_process=True,
     post_process=True,
@@ -56,13 +55,12 @@ def get_decoder_model(
     use_cpu_initialization=False,
     hidden_dropout=0.1,
     attention_dropout=0.1,
-    position_embedding_type='learned_absolute',
-    relative_attention_num_buckets=32,
-    relative_attention_max_distance=128,
+    ffn_dropout=0.0,
     precision=16,
     fp32_residual_connection=False,
     activations_checkpoint_method=None,
     activations_checkpoint_num_layers=1,
+    activations_checkpoint_granularity=None,
     layernorm_epsilon=1e-5,
     bias_activation_fusion=True,
     bias_dropout_add_fusion=True,
@@ -76,11 +74,19 @@ def get_decoder_model(
     headscale=False,
     transformer_block_type="pre_ln",
     hidden_steps=-1,
-    hidden_blocks=1,
     parent_model_type=ModelType.encoder_or_decoder,
     layer_type=None,
     chunk_size=64,
     layer_number_offset=0,  # this is use only for attention norm_factor scaling
+    megatron_legacy=False,
+    normalize_attention_scores=True,
+    sequence_parallel=False,
+    gradient_accumulation_fusion=False,
+    num_moe_experts=1,
+    moe_frequency=1,
+    moe_dropout=0.0,
+    turn_off_rop=False,  # turn off the RoP positional embedding
+    version=1,
 ):
     """Build language model and return along with the key to save."""
 
@@ -113,13 +119,12 @@ def get_decoder_model(
             use_cpu_initialization=use_cpu_initialization,
             hidden_dropout=hidden_dropout,
             attention_dropout=attention_dropout,
-            position_embedding_type=position_embedding_type,
-            relative_attention_num_buckets=relative_attention_num_buckets,
-            relative_attention_max_distance=relative_attention_max_distance,
+            ffn_dropout=ffn_dropout,
             precision=precision,
             fp32_residual_connection=fp32_residual_connection,
             activations_checkpoint_method=activations_checkpoint_method,
             activations_checkpoint_num_layers=activations_checkpoint_num_layers,
+            activations_checkpoint_granularity=activations_checkpoint_granularity,
             layernorm_epsilon=layernorm_epsilon,
             bias_activation_fusion=bias_activation_fusion,
             bias_dropout_add_fusion=bias_dropout_add_fusion,
@@ -133,6 +138,11 @@ def get_decoder_model(
             transformer_block_type=transformer_block_type,
             headscale=headscale,
             parent_model_type=parent_model_type,
+            megatron_legacy=megatron_legacy,
+            normalize_attention_scores=normalize_attention_scores,
+            num_moe_experts=num_moe_experts,
+            moe_frequency=moe_frequency,
+            moe_dropout=moe_dropout,
         )
     elif arch == "retro":
         decoder = MegatronRetrievalTransformerDecoderModule(
@@ -154,6 +164,7 @@ def get_decoder_model(
             fp32_residual_connection=fp32_residual_connection,
             activations_checkpoint_method=activations_checkpoint_method,
             activations_checkpoint_num_layers=activations_checkpoint_num_layers,
+            activations_checkpoint_granularity=activations_checkpoint_granularity,
             layernorm_epsilon=layernorm_epsilon,
             bias_activation_fusion=bias_activation_fusion,
             bias_dropout_add_fusion=bias_dropout_add_fusion,
@@ -168,6 +179,12 @@ def get_decoder_model(
             parent_model_type=parent_model_type,
             chunk_size=chunk_size,
             layer_number_offset=layer_number_offset,
+            megatron_legacy=megatron_legacy,
+            normalize_attention_scores=normalize_attention_scores,
+            sequence_parallel=sequence_parallel,
+            gradient_accumulation_fusion=gradient_accumulation_fusion,
+            turn_off_rop=turn_off_rop,
+            version=version,
         )
     else:
         raise ValueError(f"Unknown decoder arch = {arch}. Available decoder arch = {AVAILABLE_DECODERS}")
