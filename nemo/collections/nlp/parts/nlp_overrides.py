@@ -18,22 +18,20 @@ import shutil
 import tempfile
 from collections import defaultdict
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Dict, Generator, Iterator, List, Mapping, Optional, Sized, Union
 
 import pytorch_lightning as pl
 import torch
-from omegaconf import DictConfig, OmegaConf
-from pytorch_lightning.loops.fit_loop import FitLoop
+from omegaconf import OmegaConf
 from pytorch_lightning.overrides import LightningDistributedModule
-from pytorch_lightning.plugins.environments.cluster_environment import ClusterEnvironment
+from pytorch_lightning.plugins import ClusterEnvironment
 from pytorch_lightning.plugins.io.checkpoint_plugin import CheckpointIO
-from pytorch_lightning.plugins.precision import NativeMixedPrecisionPlugin
 from pytorch_lightning.plugins.precision.native_amp import NativeMixedPrecisionPlugin
-from pytorch_lightning.plugins.training_type.ddp import DDPPlugin
+from pytorch_lightning.strategies.ddp import DDPStrategy
 from pytorch_lightning.trainer.trainer import Trainer
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
 from pytorch_lightning.utilities.fetching import DataFetcher
-from pytorch_lightning.utilities.types import _PATH
 from torch.distributed.algorithms.ddp_comm_hooks.debugging_hooks import noop_hook
 from torch.nn.parallel import DistributedDataParallel
 
@@ -44,8 +42,10 @@ from nemo.utils import AppState, logging
 from nemo.utils.model_utils import inject_model_parallel_rank
 
 try:
-    from apex.transformer import parallel_state
+    from apex.transformer.enums import ModelType
+    from apex.transformer.pipeline_parallel.schedules.common import _calc_number_of_params
     from apex.transformer.pipeline_parallel.utils import get_num_microbatches
+    from apex.transformer.tensor_parallel.layers import set_defaults_if_not_set_tensor_model_parallel_attributes
 
     HAVE_APEX = True
 
@@ -53,8 +53,20 @@ except (ImportError, ModuleNotFoundError):
 
     HAVE_APEX = False
 
+try:
+    from megatron.core import parallel_state
 
-class NLPDDPPlugin(DDPPlugin):
+    HAVE_MEGATRON_CORE = True
+
+except (ImportError, ModuleNotFoundError):
+
+    HAVE_MEGATRON_CORE = False
+
+
+NEMO_MEGATRON_MODEL_PARALLEL_APPSTATE_OVERRIDE = "NEMO_MEGATRON_MODEL_PARALLEL_APPSTATE_OVERRIDE"
+
+
+class NLPDDPStrategy(DDPStrategy):
     """ DDP plugin for Pytorch Lightning. Needed to customize DDP for model parallel models.
 
     Args:
@@ -74,6 +86,11 @@ class NLPDDPPlugin(DDPPlugin):
             raise ImportError(
                 "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
             )
+
+        if not HAVE_MEGATRON_CORE:
+            raise ImportError(
+                "megatron-core was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
+            )
         super().__init__(parallel_devices, cluster_environment, checkpoint_io, **kwargs)
 
         self.no_ddp_communication_hook = no_ddp_communication_hook
@@ -83,7 +100,7 @@ class NLPDDPPlugin(DDPPlugin):
         super().setup_distributed()
 
         # init model parallel if needed
-        if parallel_state.is_unitialized():
+        if not parallel_state.model_parallel_is_initialized():
             app_state = AppState()
 
             if app_state.model_parallel_size is not None:
@@ -94,33 +111,40 @@ class NLPDDPPlugin(DDPPlugin):
             Sets find_unused_parameters to False to use activation-checkpoint-recomputation.
         """
 
-        app_state = AppState()
-
-        if app_state.model_parallel_size is not None:
-            logging.info(f"Configuring DDP for model parallelism.")
-
-            # With model parallelism, multiple GPUs form a large "logical GPU"
-            # this means that data parallel groups span multiple GPUs
-            # and are non-trivial
-            # TODO: for megatron-lm self.model is a list
-            self.pre_configure_ddp()
-            # device_ids = self.determine_ddp_device_ids()
-            self._model = DistributedDataParallel(
-                LightningDistributedModule(self.model),
-                process_group=parallel_state.get_data_parallel_group(),
-                **self._ddp_kwargs,
-            )
-
-            if self.no_ddp_communication_hook:
-                # When using custom gradient accumulation and allreduce, disable
-                # DDP communication hook that works on the gradient bucket.
-                # Instead, use the custom gradient function and communication hook,
-                # which is defined in the master optimizer wrapper.
-                self._model.require_backward_grad_sync = False
-                self._model.register_comm_hook(None, noop_hook)
-
+        if (hasattr(self.model, 'megatron_amp_o2') and self.model.megatron_amp_o2) or (
+            hasattr(self.model, 'with_distributed_adam') and self.model.with_distributed_adam
+        ):
+            # do not use DDP if using megatron amp O2 or distributed optimizer
+            self._model = LightningDistributedModule(self.model)
         else:
-            super().configure_ddp()
+            app_state = AppState()
+
+            if app_state.model_parallel_size is not None:
+
+                logging.info(f"Configuring DDP for model parallelism.")
+
+                # With model parallelism, multiple GPUs form a large "logical GPU"
+                # this means that data parallel groups span multiple GPUs
+                # and are non-trivial
+                # TODO: for megatron-lm self.model is a list
+                self.pre_configure_ddp()
+                # device_ids = self.determine_ddp_device_ids()
+                self._model = DistributedDataParallel(
+                    LightningDistributedModule(self.model),
+                    process_group=parallel_state.get_data_parallel_group(),
+                    **self._ddp_kwargs,
+                )
+
+                if self.no_ddp_communication_hook:
+                    # When using custom gradient accumulation and allreduce, disable
+                    # DDP communication hook that works on the gradient bucket.
+                    # Instead, use the custom gradient function and communication hook,
+                    # which is defined in the master optimizer wrapper.
+                    self._model.require_backward_grad_sync = False
+                    self._model.register_comm_hook(None, noop_hook)
+
+            else:
+                super().configure_ddp()
 
     def init_model_parallel(self, global_rank: int, world_size: int) -> None:
         """ Initializes Megatron-LM model parallel if using model parallelism.
@@ -140,9 +164,10 @@ class NLPDDPPlugin(DDPPlugin):
             parallel_state.destroy_model_parallel()
             if torch.distributed.is_initialized():
                 parallel_state.initialize_model_parallel(
-                    tensor_model_parallel_size_=app_state.tensor_model_parallel_size,
-                    pipeline_model_parallel_size_=app_state.pipeline_model_parallel_size,
-                    pipeline_model_parallel_split_rank_=app_state.pipeline_model_parallel_split_rank,
+                    tensor_model_parallel_size=app_state.tensor_model_parallel_size,
+                    pipeline_model_parallel_size=app_state.pipeline_model_parallel_size,
+                    virtual_pipeline_model_parallel_size=app_state.virtual_pipeline_model_parallel_size,
+                    pipeline_model_parallel_split_rank=app_state.pipeline_model_parallel_split_rank,
                 )
 
                 # assert that fake tp and pp rank match after model parallel init
@@ -156,7 +181,7 @@ class NLPDDPPlugin(DDPPlugin):
                 app_state.pipeline_model_parallel_group = parallel_state.get_pipeline_model_parallel_group()
 
     def save_checkpoint(
-        self, checkpoint: Dict[str, Any], filepath: _PATH, storage_options: Optional[Any] = None
+        self, checkpoint: Dict[str, Any], filepath: Union[str, Path], storage_options: Optional[Any] = None
     ) -> None:
         app_state = AppState()
         # PTL override to accomodate model parallel checkpoints
@@ -186,14 +211,14 @@ class NLPDDPPlugin(DDPPlugin):
 
         self.lightning_module.load_state_dict(checkpoint["state_dict"])
 
-    def load_checkpoint(self, checkpoint_path: _PATH) -> Dict[str, Any]:
+    def load_checkpoint(self, checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
         """ PTL override to accomodate model parallel checkpoints """
         # TODO: move to CheckpointIO
         torch.cuda.empty_cache()
         checkpoint_path = inject_model_parallel_rank(checkpoint_path)
         return self.checkpoint_io.load_checkpoint(checkpoint_path)
 
-    def remove_checkpoint(self, filepath: _PATH) -> None:
+    def remove_checkpoint(self, filepath: Union[str, Path]) -> None:
         app_state = AppState()
         # PTL override to accomodate model parallel checkpoints
         filepath = inject_model_parallel_rank(filepath)
@@ -214,7 +239,7 @@ class NLPDDPPlugin(DDPPlugin):
             return distributed_sampler_kwargs
 
         else:
-            return super(NLPDDPPlugin, self).distributed_sampler_kwargs
+            return super(NLPDDPStrategy, self).distributed_sampler_kwargs
 
 
 class NLPSaveRestoreConnector(SaveRestoreConnector):
@@ -227,6 +252,10 @@ class NLPSaveRestoreConnector(SaveRestoreConnector):
             # raise ImportError(
             #    "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
             # )
+        if not HAVE_MEGATRON_CORE:
+            logging.warning(
+                "megatron-core was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
+            )
         super().__init__()
 
     def save_to(self, model, save_path: str):
@@ -359,7 +388,7 @@ class NLPSaveRestoreConnector(SaveRestoreConnector):
         loaded_params = super().load_config_and_state_dict(
             calling_cls, restore_path, override_config_path, map_location, strict, return_config, trainer,
         )
-        if not isinstance(loaded_params, tuple):
+        if not isinstance(loaded_params, tuple) or return_config is True:
             return loaded_params
         conf, instance, state_dict = loaded_params
         state_dict = self.modify_state_dict(conf, state_dict)
@@ -370,17 +399,24 @@ class NLPSaveRestoreConnector(SaveRestoreConnector):
 
 class PipelineMixedPrecisionPlugin(NativeMixedPrecisionPlugin):
     """ Overrides PTL autocasting to not wrap training/val/test_step.
-        We do this because we have the Apex fwd/bwd functions in training_step.
+        We do this because we have the megatron-core fwd/bwd functions in training_step.
         This means .backward is being called in training_step so we do not want the whole
         step wrapped in autocast.
 
-        We instead wrap the fwd_output_and_loss_func that is passed to the Apex fwd/bwd functions.
+        We instead wrap the fwd_output_and_loss_func that is passed to the megatron-core fwd/bwd functions.
     """
 
     def __init__(
         self, precision: Union[str, int], device: str, scaler: Optional[torch.cuda.amp.GradScaler] = None
     ) -> None:
         super().__init__(precision, device, scaler=scaler)
+        dtype = None
+        if precision == 16:
+            dtype = torch.float16
+        elif precision == 'bf16':
+            dtype = torch.bfloat16
+
+        torch.set_autocast_gpu_dtype(dtype)
 
     @contextmanager
     def forward_context(self) -> Generator[None, None, None]:
@@ -414,6 +450,15 @@ class GradScaler(torch.cuda.amp.GradScaler):
         self.optimizer_update_skipped: Optional[bool] = None
         self.hysteresis = hysteresis
         self._hysteresis_tracker = self.hysteresis
+
+    def __call__(self, outputs):
+        return self.scale(outputs)
+
+    def _unscale_grads_(self, optimizer, *args):
+        if getattr(optimizer, "_custom_amp_unscale_grads", False):
+            return optimizer.unscale_grads(*args)
+        else:
+            return super()._unscale_grads_(optimizer, *args)
 
     def _maybe_opt_step(self, optimizer, optimizer_state, *args, **kwargs):
         retval = None
@@ -575,11 +620,18 @@ class MegatronHalfPrecisionPlugin(NativeMixedPrecisionPlugin):
         self, precision: Union[str, int], device: str, scaler: Optional[torch.cuda.amp.GradScaler] = None
     ) -> None:
         super().__init__(precision, device, scaler)
+        dtype = None
+        if precision == 16:
+            dtype = torch.float16
+        elif precision == 'bf16':
+            dtype = torch.bfloat16
+
+        torch.set_autocast_gpu_dtype(dtype)
 
     def optimizer_step(
         self,
-        model: Union["pl.LightningModule", torch.nn.Module],
         optimizer: torch.optim.Optimizer,
+        model: Union["pl.LightningModule", torch.nn.Module],
         optimizer_idx: int,
         closure: Callable[[], Any],
         **kwargs: Any,
@@ -632,6 +684,8 @@ class GlobalBatchDataFetcher(DataFetcher):
 
         if not HAVE_APEX:
             logging.warning("Apex was not found. Using model parallel or megatron models will error out.")
+        if not HAVE_MEGATRON_CORE:
+            logging.warning("Megatron-core was not found. Using model parallel or megatron models will error out..")
 
         super().__init__(prefetch_batches=prefetch_batches, store_on_device=store_on_device)
 

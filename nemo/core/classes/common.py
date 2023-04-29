@@ -23,22 +23,24 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import total_ordering
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import hydra
+import torch
 import wrapt
-from huggingface_hub import hf_hub_download
-from huggingface_hub.hf_api import HfFolder
+from huggingface_hub import HfApi, HfFolder, ModelFilter, hf_hub_download
+from huggingface_hub.hf_api import ModelInfo
 from omegaconf import DictConfig, OmegaConf
 
 import nemo
 from nemo.core.connectors.save_restore_connector import SaveRestoreConnector
 from nemo.core.neural_types import NeuralType, NeuralTypeComparisonResult
-from nemo.utils import logging, model_utils
+from nemo.utils import logging
 from nemo.utils.cloud import maybe_download_from_cloud
+from nemo.utils.data_utils import resolve_cache_dir
 from nemo.utils.model_utils import import_class_by_path, maybe_update_config_version
 
-__all__ = ['Typing', 'FileIO', 'Model', 'Serialization', 'typecheck']
+__all__ = ['Typing', 'FileIO', 'Model', 'Serialization', 'typecheck', 'PretrainedModelInfo']
 
 _TYPECHECK_ENABLED = True
 # TODO @blisc: Remove _HAS_HYDRA
@@ -286,7 +288,8 @@ class Typing(ABC):
 
             elif len(out_container) > len(out_types_list) or len(out_container) < len(mandatory_out_types_list):
                 raise TypeError(
-                    "Number of output arguments provided ({}) is not as expected. It should be larger than {} and less than {}.\n"
+                    "Number of output arguments provided ({}) is not as expected. "
+                    "It should be larger or equal than {} and less or equal than {}.\n"
                     "This can be either because insufficient/extra number of output NeuralTypes were provided,"
                     "or the provided NeuralTypes {} should enable container support "
                     "(add '[]' to the NeuralType definition)".format(
@@ -656,16 +659,115 @@ class Model(Typing, Serialization, FileIO):
 
     @classmethod
     @abstractmethod
-    def list_available_models(cls) -> Optional[PretrainedModelInfo]:
+    def list_available_models(cls) -> Optional[List[PretrainedModelInfo]]:
         """
         Should list all pre-trained models available via NVIDIA NGC cloud.
-        Note: There is no check that requires model names and aliases to be unique. In the case of a collIsion, whatever
+        Note: There is no check that requires model names and aliases to be unique. In the case of a collision, whatever
         model (or alias) is listed first in the this returned list will be instantiated.
 
         Returns:
             A list of PretrainedModelInfo entries
         """
         pass
+
+    @classmethod
+    def search_huggingface_models(
+        cls, model_filter: Optional[Union[ModelFilter, List[ModelFilter]]] = None
+    ) -> List[ModelInfo]:
+        """
+        Should list all pre-trained models available via Hugging Face Hub.
+
+        The following metadata can be passed via the `model_filter` for additional results.
+        Metadata:
+            resolve_card_info: Bool flag, if set, returns the model card metadata. Default: False.
+            limit_results: Optional int, limits the number of results returned.
+
+        .. code-block:: python
+
+            # You can replace <DomainSubclass> with any subclass of ModelPT.
+            from nemo.core import ModelPT
+
+            # Get default ModelFilter
+            filt = <DomainSubclass>.get_hf_model_filter()
+
+            # Make any modifications to the filter as necessary
+            filt.language = [...]
+            filt.task = ...
+            filt.tags = [...]
+
+            # Add any metadata to the filter as needed
+            filt.limit_results = 5
+
+            # Obtain model info
+            model_infos = <DomainSubclass>.search_huggingface_models(model_filter=filt)
+
+            # Browse through cards and select an appropriate one
+            card = model_infos[0]
+
+            # Restore model using `modelId` of the card.
+            model = ModelPT.from_pretrained(card.modelId)
+
+        Args:
+            model_filter: Optional ModelFilter or List[ModelFilter] (from Hugging Face Hub)
+                that filters the returned list of compatible model cards, and selects all results from each filter.
+                Users can then use `model_card.modelId` in `from_pretrained()` to restore a NeMo Model.
+                If no ModelFilter is provided, uses the classes default filter as defined by `get_hf_model_filter()`.
+
+        Returns:
+            A list of ModelInfo entries.
+        """
+        # Resolve model filter if not provided as argument
+        if model_filter is None:
+            model_filter = cls.get_hf_model_filter()
+
+        # If single model filter, wrap into list
+        if not isinstance(model_filter, Iterable):
+            model_filter = [model_filter]
+
+        # Inject `nemo` library filter
+        for mfilter in model_filter:
+            if isinstance(mfilter.library, str) and mfilter.library != 'nemo':
+                logging.warning(f"Model filter's `library` tag updated be `nemo`. Original value: {mfilter.library}")
+                mfilter.library = "nemo"
+
+            elif isinstance(mfilter, Iterable) and 'nemo' not in mfilter.library:
+                logging.warning(
+                    f"Model filter's `library` list updated to include `nemo`. Original value: {mfilter.library}"
+                )
+                mfilter.library = list(mfilter)
+                mfilter.library.append('nemo')
+
+        # Check if api token exists, use if it does
+        is_token_available = HfFolder.get_token() is not None
+
+        # Search for all valid models after filtering
+        api = HfApi()
+
+        # Setup extra arguments for model filtering
+        all_results = []  # type: List[ModelInfo]
+
+        for mfilter in model_filter:
+            cardData = None
+            limit = None
+
+            if hasattr(mfilter, 'resolve_card_info') and mfilter.resolve_card_info is True:
+                cardData = True
+
+            if hasattr(mfilter, 'limit_results') and mfilter.limit_results is not None:
+                limit = mfilter.limit_results
+
+            results = api.list_models(
+                filter=mfilter,
+                use_auth_token=is_token_available,
+                sort="lastModified",
+                direction=-1,
+                cardData=cardData,
+                limit=limit,
+            )  # type: List[ModelInfo]
+
+            all_results.extend(results)
+
+        return all_results
 
     @classmethod
     def get_available_model_names(cls) -> List[str]:
@@ -679,6 +781,28 @@ class Model(Typing, Serialization, FileIO):
         if cls.list_available_models() is not None:
             model_names = [model.pretrained_model_name for model in cls.list_available_models()]
         return model_names
+
+    @classmethod
+    def get_hf_model_filter(cls) -> ModelFilter:
+        """
+        Generates a filter for HuggingFace models.
+
+        Additionally includes default values of some metadata about results returned by the Hub.
+
+        Metadata:
+            resolve_card_info: Bool flag, if set, returns the model card metadata. Default: False.
+            limit_results: Optional int, limits the number of results returned.
+
+        Returns:
+            A Hugging Face Hub ModelFilter object.
+        """
+        model_filter = ModelFilter(library='nemo')
+
+        # Attach some additional info
+        model_filter.resolve_card_info = False
+        model_filter.limit_results = None
+
+        return model_filter
 
     @classmethod
     def from_pretrained(
@@ -737,7 +861,7 @@ class Model(Typing, Serialization, FileIO):
         return instance
 
     @classmethod
-    def _get_ngc_pretrained_model_info(cls, model_name: str, refresh_cache: bool = False) -> (type, str):
+    def _get_ngc_pretrained_model_info(cls, model_name: str, refresh_cache: bool = False) -> Tuple[type, str]:
         """
         Resolve the NGC model pretrained information given a model name.
         Assumes the model subclass implements the `list_available_models()` inherited method.
@@ -778,7 +902,7 @@ class Model(Typing, Serialization, FileIO):
             )
         filename = location_in_the_cloud.split("/")[-1]
         url = location_in_the_cloud.replace(filename, "")
-        cache_dir = Path.joinpath(model_utils.resolve_cache_dir(), f'{filename[:-5]}')
+        cache_dir = Path.joinpath(resolve_cache_dir(), f'{filename[:-5]}')
         # If either description and location in the cloud changes, this will force re-download
         cache_subfolder = hashlib.md5((location_in_the_cloud + description).encode('utf-8')).hexdigest()
         # if file exists on cache_folder/subfolder, it will be re-used, unless refresh_cache is True
@@ -794,7 +918,7 @@ class Model(Typing, Serialization, FileIO):
         return class_, nemo_model_file_in_cache
 
     @classmethod
-    def _get_hf_hub_pretrained_model_info(cls, model_name: str, refresh_cache: bool = False) -> (type, str):
+    def _get_hf_hub_pretrained_model_info(cls, model_name: str, refresh_cache: bool = False) -> Tuple[type, str]:
         """
         Resolve the HuggingFace Hub model pretrained information given a model name.
         The model name must be of general syntax ``{source_repo}/{model_name}``.
