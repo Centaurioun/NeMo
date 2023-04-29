@@ -1,12 +1,13 @@
 black==19.10b0
-isort[requirements] < 5
+click==8.0.2
+isort>5.1.0,<6.0.0
 parameterized
 pytest
 pytest-runner
 ruamel.yaml
 sphinx
 sphinxcontrib-bibtex
-wrapt
-wget
 wandb
-setuptools>=65.5.1 # not directly required, pinned by Snyk to avoid a vulnerability
+setuptools
+wget
+wrapt

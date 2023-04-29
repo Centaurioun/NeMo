@@ -42,8 +42,32 @@ EN
                 
 --------------------
 
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/en/squeezeformer_en.csv
+                
+--------------------
+
+BE
+^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/be/conformer_be.csv
+    
+--------------------
+
 CA
 ^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/ca/conformer_ca.csv
+    
+--------------------
 
 .. csv-table::
     :header-rows: 1
@@ -97,6 +121,16 @@ ENES
     :header-rows: 1
     :align: left
     :file: data/scores/enes/contextnet_enes.csv
+    
+--------------------
+
+EO
+^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/eo/conformer_eo.csv
     
 --------------------
 
@@ -162,13 +196,40 @@ FR
     
 --------------------
 
+HR
+^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/hr/conformer_hr.csv
+    
+--------------------
+
 IT
 ^^
 
 .. csv-table::
     :header-rows: 1
     :align: left
+    :file: data/scores/it/conformer_it.csv
+    
+--------------------
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
     :file: data/scores/it/quartznet15x5_it.csv
+    
+--------------------
+
+KAB
+^^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/kab/conformer_kab.csv
     
 --------------------
 
@@ -188,7 +249,24 @@ RU
 .. csv-table::
     :header-rows: 1
     :align: left
+    :file: data/scores/ru/conformer_ru.csv
+    
+--------------------
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
     :file: data/scores/ru/quartznet15x5_ru.csv
+    
+--------------------
+
+RW
+^^
+
+.. csv-table::
+    :header-rows: 1
+    :align: left
+    :file: data/scores/rw/conformer_rw.csv
     
 --------------------
 
