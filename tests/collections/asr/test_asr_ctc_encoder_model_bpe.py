@@ -291,6 +291,7 @@ class TestEncDecCTCModel:
             'pin_memory',
             'drop_last',
             'tarred_shard_strategy',
+            'shard_manifests',
             'shuffle_n',
             'parser',
             'normalize',
@@ -301,6 +302,8 @@ class TestEncDecCTCModel:
             'blank_index',
             'bucketing_batch_size',
             'bucketing_strategy',
+            'bucketing_weights',
+            'channel_selector',
         ]
 
         REMAP_ARGS = {'trim_silence': 'trim', 'labels': 'tokenizer'}
@@ -335,6 +338,8 @@ class TestEncDecCTCModel:
             'world_size',
             'bucketing_batch_size',
             'bucketing_strategy',
+            'bucketing_weights',
+            'max_utts',
         ]
 
         REMAP_ARGS = {

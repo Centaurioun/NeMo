@@ -82,6 +82,7 @@ class TranslationDataset(Dataset):
         use_cache: bool = False,
         reverse_lang_direction: bool = False,
         prepend_id: int = None,
+        add_bos_eos_to_encoder: bool = True,
     ):
         self.dataset_src = dataset_src
         self.dataset_tgt = dataset_tgt
@@ -96,6 +97,7 @@ class TranslationDataset(Dataset):
         self.max_seq_length_ratio = max_seq_length_ratio
         self.reverse_lang_direction = reverse_lang_direction
         self.prepend_id = prepend_id
+        self.add_bos_eos_to_encoder = add_bos_eos_to_encoder
 
         # deprecation warnings for cache_ids, use_cache, and cache_data_per_node
         if self.cache_ids is True or self.use_cache is True or self.cache_data_per_node is True:
@@ -110,6 +112,8 @@ class TranslationDataset(Dataset):
             cache_ids=self.cache_ids,
             cache_data_per_node=self.cache_data_per_node,
             use_cache=self.use_cache,
+            add_bos_eos=self.add_bos_eos_to_encoder,
+            remove_trailing_newline=True,
         )
         tgt_ids = dataset_to_ids(
             self.dataset_tgt,
@@ -117,6 +121,7 @@ class TranslationDataset(Dataset):
             cache_ids=self.cache_ids,
             cache_data_per_node=self.cache_data_per_node,
             use_cache=self.use_cache,
+            remove_trailing_newline=True,
         )
         if self.clean:
             src_ids, tgt_ids = self.clean_src_and_target(
@@ -326,10 +331,15 @@ class TarredTranslationDataset(IterableDataset):
                 available in the tarred dataset, which are permanently pre-allocated and never changed at runtime.
                 The benefit of replication is that it allows each node to sample data points from the entire
                 dataset independently of other nodes, and reduces dependence on value of `shuffle_n`.
-                Note: Replicated strategy allows every node to sample the entire set of available tarfiles,
-                and therefore more than one node may sample the same tarfile, and even sample the same
-                data points! As such, there is no assured guarantee that all samples in the dataset will be
-                sampled at least once during 1 epoch.
+
+                .. warning::
+                    Replicated strategy allows every node to sample the entire set of available tarfiles,
+                    and therefore more than one node may sample the same tarfile, and even sample the same
+                    data points! As such, there is no assured guarantee that all samples in the dataset will be
+                    sampled at least once during 1 epoch. Scattered strategy, on the other hand, on specific
+                    occasions (when the number of shards is not divisible with ``world_size``), will not sample
+                    the entire dataset. For these reasons it is not advisable to use tarred datasets as validation
+                    or test datasets.
         global_rank (int): Worker rank, used for partitioning shards. Defaults to 0.
         world_size (int): Total number of processes, used for partitioning shards. Defaults to 1.
         reverse_lang_direction (bool): When True, swaps the source and target directions when returning minibatches.
@@ -360,7 +370,11 @@ class TarredTranslationDataset(IterableDataset):
 
         valid_shard_strategies = ['scatter', 'replicate']
         if shard_strategy not in valid_shard_strategies:
-            raise ValueError(f"`shard_strategy` must be one of {valid_shard_strategies}")
+            raise ValueError(
+                f"Invalid shard strategy of type {type(shard_strategy)} "
+                f"{repr(shard_strategy) if len(repr(shard_strategy)) < 100 else repr(shard_strategy)[:100] + '...'}! "
+                f"Allowed values are: {valid_shard_strategies}."
+            )
 
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
@@ -385,12 +399,14 @@ class TarredTranslationDataset(IterableDataset):
             text_tar_filepaths = list(braceexpand.braceexpand(text_tar_filepaths))
 
         if shard_strategy == 'scatter':
-            logging.info("All tarred dataset shards will be scattered evenly across all nodes.")
+            logging.info("Tarred dataset shards will be scattered evenly across all nodes.")
             if len(text_tar_filepaths) % world_size != 0:
                 logging.warning(
                     f"Number of shards in tarred dataset ({len(text_tar_filepaths)}) is not divisible "
-                    f"by number of distributed workers ({world_size})."
+                    f"by number of distributed workers ({world_size}). "
+                    f"Some shards will not be used ({len(text_tar_filepaths) % world_size})."
                 )
+            batches_per_tar = self.metadata['num_batches'] // len(text_tar_filepaths)
             begin_idx = (len(text_tar_filepaths) // world_size) * global_rank
             end_idx = begin_idx + (len(text_tar_filepaths) // world_size)
             logging.info('Begin Index : %d' % (begin_idx))
@@ -399,7 +415,7 @@ class TarredTranslationDataset(IterableDataset):
             logging.info(
                 "Partitioning tarred dataset: process (%d) taking shards [%d, %d)", global_rank, begin_idx, end_idx
             )
-            self.length = self.metadata['num_batches'] // world_size
+            self.length = batches_per_tar * len(text_tar_filepaths) * world_size
 
         elif shard_strategy == 'replicate':
             logging.info("All tarred dataset shards will be replicated across all nodes.")
