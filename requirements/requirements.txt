@@ -1,15 +1,17 @@
-setuptools==65.5.1
-numpy>=1.21
-onnx>=1.7.0
+setuptools
+huggingface_hub
+numba
+numpy
+onnx
 python-dateutil
-torch
-wrapt
 ruamel.yaml
 scikit-learn
-tqdm>=4.41.0
-numba
+tensorboard
+text-unidecode
+torch
+tqdm
 wget
 frozendict
 unidecode
-huggingface_hub
-wheel>=0.38.0 # not directly required, pinned by Snyk to avoid a vulnerability
+wheel
+wrapt

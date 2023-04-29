@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from pytorch_lightning.trainer.trainer import Trainer
 
+from nemo.collections.nlp.modules.common.megatron.attention import ParallelChunkedCrossAttention
 from nemo.collections.nlp.modules.common.megatron.layer_type import LayerType
 from nemo.collections.nlp.modules.common.megatron.megatron_init import initialize_model_parallel_for_nemo
 from nemo.collections.nlp.modules.common.megatron.retrieval_token_level_encoder_decoder import (
@@ -29,13 +30,12 @@ from nemo.collections.nlp.modules.common.megatron.retrieval_transformer import (
     MegatronRetrievalTransformerEncoderModule,
 )
 from nemo.collections.nlp.modules.common.megatron.rotary_pos_embedding import RotaryEmbedding
-from nemo.collections.nlp.modules.common.megatron.transformer import ParallelChunkedCrossAttention
 from nemo.collections.nlp.modules.common.megatron.utils import (
     build_attention_mask_3d,
     init_method_normal,
     scaled_init_method_normal,
 )
-from nemo.collections.nlp.parts.nlp_overrides import NLPDDPPlugin
+from nemo.collections.nlp.parts.nlp_overrides import NLPDDPStrategy
 
 try:
     from apex.transformer.enums import AttnMaskType
@@ -44,24 +44,30 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAVE_APEX = False
 
+try:
+    from megatron.core.enums import ModelType
+
+    HAVE_MEGATRON_CORE = True
+
+except (ImportError, ModuleNotFoundError):
+
+    HAVE_MEGATRON_CORE = False
+
 
 @pytest.mark.run_only_on('GPU')
-@pytest.mark.skipif(not HAVE_APEX, reason="apex is not installed")
+@pytest.mark.skipif(not HAVE_APEX or not HAVE_MEGATRON_CORE, reason="apex or megatron-core is not installed")
 class TestRetrievalModuleInference:
     @classmethod
     def setup_class(cls):
         if not torch.cuda.is_available():
             return
         GPUS = 1
-        plugins = [NLPDDPPlugin()]
         TP_SIZE = GPUS
         PP_SIZE = 1
         MB_SIZE = 4
         GB_SIZE = 8
         SEED = 1234
-        trainer = Trainer(
-            plugins=plugins, devices=GPUS, accelerator='gpu', num_nodes=1, logger=None, log_gpu_memory=None
-        )
+        trainer = Trainer(strategy=NLPDDPStrategy(), devices=GPUS, accelerator='gpu', num_nodes=1, logger=None,)
 
         initialize_model_parallel_for_nemo(
             world_size=trainer.world_size,
@@ -315,6 +321,7 @@ class TestRetrievalModuleInference:
                 hidden_size=dim,
                 precision=16,
                 chunk_size=text_chunk_size,
+                masked_softmax_fusion=False,
             )
             .cuda()
             .half()
@@ -470,7 +477,7 @@ class TestRetrievalModuleInference:
             .half()
         )
         out = decoder(hidden_emb, hidden_mask, retrieved_attn_mask=context_mask, retrieved_emb=retrieved_emb)
-        assert out.shape == torch.Size([batch, input_length, dim])
+        assert out.shape == torch.Size([input_length, batch, dim])
 
         out_1 = decoder(
             hidden_emb[:, :62],
@@ -480,7 +487,7 @@ class TestRetrievalModuleInference:
             set_inference_key_value_memory=True,
             inference_max_sequence_len=input_length,
         )
-        assert (out[:, :62] - out_1[:, :62]).abs().max().item() < 1e-2
+        assert (out[:62] - out_1[:62]).abs().max().item() < 1e-2
         out_1 = decoder(
             hidden_emb[:, 62:63],
             hidden_mask[:, :63],
@@ -489,7 +496,7 @@ class TestRetrievalModuleInference:
             set_inference_key_value_memory=False,
             inference_max_sequence_len=input_length,
         )
-        assert (out[:, 62] - out_1[:, 0]).abs().max().item() < 1e-2
+        assert (out[62] - out_1[0]).abs().max().item() < 1e-2
         out_2 = decoder(
             hidden_emb[:, 63:64],
             hidden_mask[:, :64],
@@ -498,7 +505,7 @@ class TestRetrievalModuleInference:
             set_inference_key_value_memory=False,
             inference_max_sequence_len=input_length,
         )
-        assert (out[:, 63] - out_2[:, 0]).abs().max().item() < 1e-2
+        assert (out[63] - out_2[0]).abs().max().item() < 1e-2
         for i in range(64, 127):
             out_2 = decoder(
                 hidden_emb[:, i : i + 1],
@@ -508,7 +515,7 @@ class TestRetrievalModuleInference:
                 set_inference_key_value_memory=False,
                 inference_max_sequence_len=input_length,
             )
-            assert (out[:, i] - out_2[:, 0]).abs().max().item() < 1e-2
+            assert (out[i] - out_2[0]).abs().max().item() < 1e-2
         for i in range(127, 191):
             out_3 = decoder(
                 hidden_emb[:, i : i + 1],
@@ -518,7 +525,7 @@ class TestRetrievalModuleInference:
                 set_inference_key_value_memory=False,
                 inference_max_sequence_len=input_length,
             )
-            assert (out[:, i] - out_3[:, 0]).abs().max().item() < 1e-2
+            assert (out[i] - out_3[0]).abs().max().item() < 1e-2
 
         out_1 = decoder(
             hidden_emb[:, :130],
@@ -528,7 +535,7 @@ class TestRetrievalModuleInference:
             set_inference_key_value_memory=True,
             inference_max_sequence_len=input_length,
         )
-        assert (out[:, :130] - out_1[:, :130]).abs().max().item() < 1e-2
+        assert (out[:130] - out_1[:130]).abs().max().item() < 1e-2
         for i in range(130, 191):
             out_3 = decoder(
                 hidden_emb[:, i : i + 1],
@@ -538,7 +545,7 @@ class TestRetrievalModuleInference:
                 set_inference_key_value_memory=False,
                 inference_max_sequence_len=input_length,
             )
-            assert (out[:, i] - out_3[:, 0]).abs().max().item() < 1e-2
+            assert (out[i] - out_3[0]).abs().max().item() < 1e-2
 
     @pytest.mark.unit
     def test_encoder_decoder_module_inference(self):

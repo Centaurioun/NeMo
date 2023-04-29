@@ -87,6 +87,7 @@ import gzip
 import json
 import multiprocessing
 import os
+import pathlib
 import sys
 import time
 
@@ -226,6 +227,7 @@ def get_args():
         '--tokenizer-model', type=str, default=None, help='Path to tokenizer model.',
     )
     group.add_argument('--vocab-file', type=str, default=None, help='Path to the vocab file')
+    group.add_argument('--files-filter', type=str, default='**/*.json*', help='files filter str')
     group.add_argument('--merge-file', type=str, default=None, help='Path to the BPE merge file (if necessary).')
     group.add_argument('--delimiter', type=str, default=None, help='delimiter used for tabular tokenizer')
     group.add_argument('--append-eod', action='store_true', help='Append an <eod> token to the end of a document.')
@@ -238,6 +240,9 @@ def get_args():
     group = parser.add_argument_group(title='runtime')
     group.add_argument('--workers', type=int, default=1, help='Number of worker processes to launch')
     group.add_argument('--chunk_size', type=int, default=64, help='chunk size used for retrieval')
+    group.add_argument(
+        '--chunk_stride_size', type=int, default=64, help='the stride size for neighbor chunks used for retrieval'
+    )
 
     group.add_argument('--log-interval', type=int, default=100, help='Interval between progress updates')
     group.add_argument(
@@ -269,10 +274,8 @@ def main():
     if args.preproc_folder:
         print('Searching folder for .json or .json.gz files...')
         assert os.path.exists(args.input), f'Folder does not exist: {args.input}'
-        files_in_folder = os.listdir(args.input)
-        json_files = [
-            os.path.join(args.input, f) for f in files_in_folder if f.endswith('.json') or f.endswith('.json.gz')
-        ]
+        json_files = (str(f) for f in pathlib.Path(args.input).glob(args.files_filter))
+        json_files = [f for f in json_files if f.endswith('.json') or f.endswith('.json.gz')]
         if len(json_files) == 0:
             raise FileNotFoundError('No .json or .json.gz files found in folder.')
         else:
@@ -309,6 +312,7 @@ def main():
             pad_id=tokenizer.pad_id if hasattr(tokenizer, "pad_id") else 0,
             retrieval_db=args.retrieval_db,
             vocab_size=tokenizer.vocab_size,
+            stride=args.chunk_stride_size,
         )
 
     startup_end = time.time()
