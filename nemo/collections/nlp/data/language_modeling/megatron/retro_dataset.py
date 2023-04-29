@@ -37,11 +37,13 @@ from nemo.core import Dataset
 from nemo.utils import logging
 
 try:
-    from apex.transformer import parallel_state
+    from megatron.core import parallel_state
 
-    HAVE_APEX = True
+    HAVE_MEGATRON_CORE = True
+
 except (ImportError, ModuleNotFoundError):
-    HAVE_APEX = False
+
+    HAVE_MEGATRON_CORE = False
 
 __all__ = [
     "RETRODataset",
@@ -76,9 +78,9 @@ class RETRODataset(Dataset):
         knn_index: KNNIndex,
         retrieval_index: MMapRetrievalIndexedDataset,
     ):
-        if not HAVE_APEX:
+        if not HAVE_MEGATRON_CORE:
             raise ImportError(
-                "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
+                "megatron-core was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
             )
 
         super().__init__()
@@ -272,6 +274,7 @@ def build_train_valid_test_datasets(
     # Parse the values.
     output = get_datasets_weights_and_num_samples(data_prefix, train_valid_test_num_samples)
     prefixes, weights, datasets_train_valid_test_num_samples = output
+    train_n, valid_n, test_n = map(sum, zip(*datasets_train_valid_test_num_samples))
 
     # Build individual datasets.
     train_datasets = []
@@ -302,13 +305,13 @@ def build_train_valid_test_datasets(
     # Blend.
     blending_train_dataset = None
     if train_datasets:
-        blending_train_dataset = BlendableDataset(train_datasets, weights)
+        blending_train_dataset = BlendableDataset(train_datasets, weights, train_n)
     blending_valid_dataset = None
     if valid_datasets:
-        blending_valid_dataset = BlendableDataset(valid_datasets, weights)
+        blending_valid_dataset = BlendableDataset(valid_datasets, weights, valid_n)
     blending_test_dataset = None
     if test_datasets:
-        blending_test_dataset = BlendableDataset(test_datasets, weights)
+        blending_test_dataset = BlendableDataset(test_datasets, weights, test_n)
 
     return (blending_train_dataset, blending_valid_dataset, blending_test_dataset)
 
