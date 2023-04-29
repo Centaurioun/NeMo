@@ -1,6 +1,8 @@
 git+https://github.com/MTG/freesound-python.git
-requests
-requests_oauthlib
 joblib
 librosa
+requests
+requests_oauthlib
 sox
+numpy>=1.22.2 # not directly required, pinned by Snyk to avoid a vulnerability
+setuptools>=65.5.1 # not directly required, pinned by Snyk to avoid a vulnerability
