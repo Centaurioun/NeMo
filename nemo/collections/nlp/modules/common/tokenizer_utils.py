@@ -26,16 +26,16 @@ from nemo.collections.common.tokenizers.word_tokenizer import WordTokenizer
 from nemo.collections.common.tokenizers.youtokentome_tokenizer import YouTokenToMeTokenizer
 from nemo.collections.nlp.modules.common.huggingface.huggingface_utils import get_huggingface_pretrained_lm_models_list
 from nemo.collections.nlp.modules.common.lm_utils import get_pretrained_lm_models_list
-from nemo.collections.nlp.parts.nlp_overrides import HAVE_APEX
+from nemo.collections.nlp.parts.nlp_overrides import HAVE_MEGATRON_CORE
 from nemo.utils import logging
 
 try:
     from nemo.collections.nlp.modules.common.megatron.megatron_utils import get_megatron_tokenizer
 
-    HAVE_APEX = True
+    HAVE_MEGATRON_CORE = True
 
 except (ImportError, ModuleNotFoundError):
-    HAVE_APEX = False
+    HAVE_MEGATRON_CORE = False
 
 
 __all__ = ['get_tokenizer', 'get_tokenizer_list']
@@ -101,9 +101,9 @@ def get_tokenizer(
         special_tokens_dict = special_tokens
 
     if 'megatron' in tokenizer_name:
-        if not HAVE_APEX:
+        if not HAVE_MEGATRON_CORE:
             raise ImportError(
-                "Apex was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
+                "Megatron-core was not found. Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
             )
         if vocab_file is None:
             vocab_file = nemo.collections.nlp.modules.common.megatron.megatron_utils.get_megatron_vocab_file(
@@ -125,7 +125,7 @@ def get_tokenizer(
     elif tokenizer_name == 'char':
         return CharTokenizer(vocab_file=vocab_file, **special_tokens_dict)
     elif tokenizer_name == 'regex':
-        return RegExTokenizer().load_tokenizer(tokenizer_model)
+        return RegExTokenizer().load_tokenizer(regex_file=tokenizer_model, vocab_file=vocab_file)
 
     logging.info(
         f"Getting HuggingFace AutoTokenizer with pretrained_model_name: {tokenizer_name}, vocab_file: {vocab_file}, merges_files: {merges_file}, "
@@ -197,7 +197,7 @@ def get_nmt_tokenizer(
         return ByteLevelTokenizer(special_tokens_dict)
     elif library == 'regex':
         logging.info(f'Using regex tokenization')
-        return RegExTokenizer().load_tokenizer(tokenizer_model)
+        return RegExTokenizer().load_tokenizer(regex_file=tokenizer_model, vocab_file=vocab_file)
     elif library == 'megatron':
         if model_name in megatron_tokenizer_model_map:
             model_name = megatron_tokenizer_model_map[model_name]

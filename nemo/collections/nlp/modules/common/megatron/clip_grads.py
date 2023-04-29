@@ -14,20 +14,43 @@
 
 """Gradient clipping."""
 
+import itertools
+
 import torch
-from torch._six import inf
+from torch import inf
 
 from nemo.collections.nlp.modules.common.megatron.module import param_is_not_shared
 
 try:
     import amp_C
     from apex.multi_tensor_apply import multi_tensor_applier
-    from apex.transformer import parallel_state
-    from apex.transformer.tensor_parallel.layers import param_is_not_tensor_parallel_duplicate
 
     HAVE_APEX = True
+
 except (ImportError, ModuleNotFoundError):
+
     HAVE_APEX = False
+
+HAVE_APEX_DISTRIBUTED_ADAM = False
+
+if HAVE_APEX:
+    try:
+        from apex.contrib.optimizers.distributed_fused_adam import DistributedFusedAdam
+
+        HAVE_APEX_DISTRIBUTED_ADAM = True
+
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+try:
+    from megatron.core import parallel_state
+    from megatron.core.tensor_parallel.layers import param_is_not_tensor_parallel_duplicate
+
+    HAVE_MEGATRON_CORE = True
+
+except (ImportError, ModuleNotFoundError):
+
+    HAVE_MEGATRON_CORE = False
 
 
 def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):
@@ -144,3 +167,39 @@ def count_zeros_fp32(parameters):
     total_num_zeros = total_num_zeros.item()
 
     return total_num_zeros
+
+
+def clip_grad_norm_distributed_optimizer(optimizer, max_norm, norm_type=2):
+    """Clips gradient norm of parameters in distributed optimizer
+
+    This is a wrapper around DistributedFusedAdam.clip_grad_norm with
+    added functionality to handle model parallel parameters.
+
+    Arguments:
+        parameters (DistributedFusedAdam): distributed optimizer
+        max_norm (float or int): max norm of the gradients
+        norm_type (float or int): type of the used p-norm. Currently
+            only 2-norm is supported.
+
+    Returns:
+        Total norm of the parameters (viewed as a single vector).
+
+    """
+    assert isinstance(optimizer, DistributedFusedAdam)
+
+    # Filter parameters based on:
+    #   - parameter should not be shared
+    #   - should not be a replica due to tensor model parallelism
+    params_for_norm = []
+    for param in optimizer.parameters(with_fp32_optim_params=True):
+        is_not_shared = param_is_not_shared(param)
+        is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param)
+        if is_not_shared and is_not_tp_duplicate:
+            params_for_norm.append(param)
+
+    # Compute grad norm
+    # Note: DistributedFusedAdam caches grad norm to avoid redundant
+    # communication.
+    optimizer.grad_norm(parameters=params_for_norm, norm_type=norm_type)
+
+    return optimizer.clip_grad_norm(max_norm, norm_type=norm_type)
