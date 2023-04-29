@@ -8,5 +8,6 @@ ruamel.yaml
 sphinx
 sphinxcontrib-bibtex
 wandb
+setuptools
 wget
 wrapt
