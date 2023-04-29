@@ -178,6 +178,8 @@ class MTDataPreproc:
                 decoder_tokenizer_model=getattr(self, "decoder_tokenizer_model", None),
                 decoder_bpe_dropout=cfg.decoder_tokenizer.get('bpe_dropout', 0.0),
                 decoder_r2l=cfg.decoder_tokenizer.get('r2l', False),
+                encoder_tokenizer_legacy=cfg.encoder_tokenizer.get('sentencepiece_legacy', False),
+                decoder_tokenizer_legacy=cfg.decoder_tokenizer.get('sentencepiece_legacy', False),
             )
 
             # If using tarred dataset for training, automatically create it if needed
@@ -228,11 +230,13 @@ class MTDataPreproc:
                             encoder_tokenizer_model=getattr(self, "encoder_tokenizer_model", None),
                             encoder_bpe_dropout=cfg.encoder_tokenizer.get('bpe_dropout', 0.0),
                             encoder_tokenizer_r2l=cfg.encoder_tokenizer.get('r2l', False),
+                            encoder_tokenizer_legacy=cfg.encoder_tokenizer.get('sentencepiece_legacy', False),
                             decoder_tokenizer_name=cfg.decoder_tokenizer.get('library'),
                             decoder_model_name=cfg.decoder.get('model_name'),
                             decoder_tokenizer_model=getattr(self, "decoder_tokenizer_model", None),
                             decoder_bpe_dropout=cfg.decoder_tokenizer.get('bpe_dropout', 0.0),
                             decoder_tokenizer_r2l=cfg.decoder_tokenizer.get('r2l', False),
+                            decoder_tokenizer_legacy=cfg.decoder_tokenizer.get('sentencepiece_legacy', False),
                             max_seq_length=cfg.train_ds.get('max_seq_length', 512),
                             tokens_in_batch=cfg.train_ds.get('tokens_in_batch', 8192),
                             lines_per_dataset_fragment=cfg.train_ds.get('lines_per_dataset_fragment', 1000000),
@@ -759,6 +763,9 @@ class MTDataPreproc:
         encoder_special_tokens=None,
         decoder_special_tokens=None,
         spt_symbols=None,
+        byte_fallback=False,
+        split_digits=False,
+        split_by_whitespace=True,
     ):
         """Trains a tokenizer with requested parameters, returns None if the tokenizer is not trainable"""
 
@@ -799,7 +806,7 @@ class MTDataPreproc:
                                 yttm.BPE.train(
                                     data=concat_data_path,
                                     vocab_size=encoder_tokenizer_vocab_size,
-                                    model=os.path.join(out_dir, encoder_tokenizer_model),
+                                    model=encoder_tokenizer_model,
                                     coverage=encoder_tokenizer_coverage,
                                     n_threads=-1,
                                 )
@@ -817,10 +824,12 @@ class MTDataPreproc:
                                     pad=True,
                                     control_symbols=spt_symbols,
                                     user_defined_symbols=encoder_special_tokens,
+                                    byte_fallback=byte_fallback,
+                                    split_digits=split_digits,
+                                    split_by_whitespace=split_by_whitespace,
                                 )
                                 os.rename(
-                                    os.path.join(out_dir, 'tokenizer.model'),
-                                    os.path.join(out_dir, encoder_tokenizer_model),
+                                    os.path.join(out_dir, 'tokenizer.model'), encoder_tokenizer_model,
                                 )
         else:
             if encoder_tokenizer_name in supported_train_tokenizers:
@@ -859,8 +868,11 @@ class MTDataPreproc:
                                 pad=True,
                                 control_symbols=spt_symbols,
                                 user_defined_symbols=encoder_special_tokens,
+                                byte_fallback=byte_fallback,
+                                split_digits=split_digits,
+                                split_by_whitespace=split_by_whitespace,
                             )
-                            os.rename(os.path.join(dir_name, 'tokenizer.model'), os.path.join(encoder_tokenizer_model))
+                            os.rename(os.path.join(dir_name, 'tokenizer.model'), encoder_tokenizer_model)
 
             if decoder_tokenizer_name in supported_train_tokenizers:
                 decoder_tokenizer_model = os.path.join(
@@ -898,8 +910,11 @@ class MTDataPreproc:
                                 pad=True,
                                 control_symbols=spt_symbols,
                                 user_defined_symbols=decoder_special_tokens,
+                                byte_fallback=byte_fallback,
+                                split_digits=split_digits,
+                                split_by_whitespace=split_by_whitespace,
                             )
-                            os.rename(os.path.join(dir_name, 'tokenizer.model'), os.path.join(decoder_tokenizer_model))
+                            os.rename(os.path.join(dir_name, 'tokenizer.model'), decoder_tokenizer_model)
 
         return encoder_tokenizer_model, decoder_tokenizer_model
 

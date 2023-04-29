@@ -1,4 +1,5 @@
 # Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,16 +20,14 @@ from nemo.collections.nlp.modules.common.megatron.layer_type import LayerType
 from nemo.collections.nlp.modules.common.megatron.megatron_decoders import get_decoder_model
 from nemo.collections.nlp.modules.common.megatron.megatron_encoders import get_encoder_model
 from nemo.collections.nlp.modules.common.megatron.module import MegatronModule
-from nemo.collections.nlp.modules.common.megatron.token_level_encoder_decoder import MegatronTokenLevelHead
+from nemo.collections.nlp.modules.common.megatron.mup.layer import MuReadout
 from nemo.collections.nlp.modules.common.megatron.utils import (
     ApexGuardDefaults,
-    build_position_ids,
     init_method_normal,
     scaled_init_method_normal,
 )
 
 try:
-    from apex.transformer import tensor_parallel
     from apex.transformer.enums import ModelType
 
     HAVE_APEX = True
@@ -37,6 +36,14 @@ except (ImportError, ModuleNotFoundError):
     # fake missing classes with None attributes
     AttnMaskType = ApexGuardDefaults()
     ModelType = ApexGuardDefaults()
+
+try:
+    from megatron.core import tensor_parallel
+
+    HAVE_MEGATRON_CORE = True
+except (ImportError, ModuleNotFoundError):
+
+    HAVE_MEGATRON_CORE = True
 
 
 __all__ = ["MegatronRetrievalTokenLevelEncoderDecoderModule"]
@@ -80,7 +87,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         headscale=False,
         transformer_block_type='pre_ln',
         hidden_steps=-1,
-        hidden_blocks=1,
         add_encoder=True,
         add_decoder=True,
         chunk_size=64,
@@ -90,9 +96,17 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         dec_cross_attention=[3, 5],  # layer numbers for chunked cross attention
         add_position_embedding=False,
         tokenizer=None,  # tokenizer
+        normalize_attention_scores=True,
+        activations_checkpoint_granularity=None,
+        megatron_lm_compatible=False,
+        version=1,
     ):
         super(MegatronRetrievalTokenLevelEncoderDecoderModule, self).__init__()
-
+        if megatron_lm_compatible:
+            assert (
+                apply_query_key_layer_scaling
+            ), "megatron lm compatible model has to set apply_query_key_layer_scaling"
+            assert add_position_embedding, "megatron lm compatible model has to set add_position_embedding"
         self.parallel_output = parallel_output
         self.pre_process = pre_process
         self.post_process = post_process
@@ -105,6 +119,7 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         self.eod_id = tokenizer.eos_id
         self.transformer_block_type = transformer_block_type
         self.num_chunked_cross_attention = len(dec_cross_attention)
+        self.megatron_lm_compatible = megatron_lm_compatible
 
         if kv_channels is None:
             assert (
@@ -121,7 +136,8 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 num_tokentypes=num_tokentypes,
                 use_cpu_initialization=use_cpu_initialization,
                 embedding_dropout_prob=hidden_dropout,
-                add_position_embedding=add_position_embedding,
+                position_embedding_type='learned_absolute' if add_position_embedding else '',
+                transpose_batch_sequence=False,
             )
             self._embedding_key = "embedding"
 
@@ -151,7 +167,9 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 init_method=encoder_init,
                 scaled_init_method=encoder_scaled_init,
                 pre_process=pre_process,
-                post_process=post_process,
+                post_process=False
+                if megatron_lm_compatible
+                else post_process,  # megatron lm model has no final layer_norm
                 init_method_std=init_method_std,
                 use_cpu_initialization=use_cpu_initialization,
                 hidden_dropout=hidden_dropout,
@@ -160,6 +178,7 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 fp32_residual_connection=fp32_residual_connection,
                 activations_checkpoint_method=activations_checkpoint_method,
                 activations_checkpoint_num_layers=activations_checkpoint_num_layers,
+                activations_checkpoint_granularity=activations_checkpoint_granularity,
                 layernorm_epsilon=layernorm_epsilon,
                 bias_activation_fusion=bias_gelu_fusion,
                 bias_dropout_add_fusion=bias_dropout_add_fusion,
@@ -168,7 +187,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 openai_gelu=openai_gelu,
                 onnx_safe=onnx_safe,
                 hidden_steps=hidden_steps,
-                hidden_blocks=hidden_blocks,
                 activation=activation,
                 bias=bias,
                 normalization=normalization,
@@ -178,6 +196,9 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 layer_type=enc_layer_types,
                 chunk_size=chunk_size,
                 layer_number_offset=0,
+                normalize_attention_scores=normalize_attention_scores,
+                turn_off_rop=megatron_lm_compatible,
+                version=version,
             )
             self._encoder_key = "encoder"
 
@@ -221,6 +242,7 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 fp32_residual_connection=fp32_residual_connection,
                 activations_checkpoint_method=activations_checkpoint_method,
                 activations_checkpoint_num_layers=activations_checkpoint_num_layers,
+                activations_checkpoint_granularity=activations_checkpoint_granularity,
                 layernorm_epsilon=layernorm_epsilon,
                 bias_activation_fusion=bias_gelu_fusion,
                 bias_dropout_add_fusion=bias_dropout_add_fusion,
@@ -229,7 +251,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 openai_gelu=openai_gelu,
                 onnx_safe=onnx_safe,
                 hidden_steps=hidden_steps,
-                hidden_blocks=hidden_blocks,
                 activation=activation,
                 bias=bias,
                 normalization=normalization,
@@ -239,6 +260,9 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 layer_type=pre_decoder_layer_types,
                 chunk_size=chunk_size,
                 layer_number_offset=0,
+                normalize_attention_scores=normalize_attention_scores,
+                turn_off_rop=megatron_lm_compatible,
+                version=version,
             )
 
             # it is where the chunked cross attention happens
@@ -262,6 +286,7 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 fp32_residual_connection=fp32_residual_connection,
                 activations_checkpoint_method=activations_checkpoint_method,
                 activations_checkpoint_num_layers=activations_checkpoint_num_layers,
+                activations_checkpoint_granularity=activations_checkpoint_granularity,
                 layernorm_epsilon=layernorm_epsilon,
                 bias_activation_fusion=bias_gelu_fusion,
                 bias_dropout_add_fusion=bias_dropout_add_fusion,
@@ -270,7 +295,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 openai_gelu=openai_gelu,
                 onnx_safe=onnx_safe,
                 hidden_steps=hidden_steps,
-                hidden_blocks=hidden_blocks,
                 activation=activation,
                 bias=bias,
                 normalization=normalization,
@@ -280,6 +304,9 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 layer_type=post_decoder_layer_types,
                 chunk_size=chunk_size,
                 layer_number_offset=pre_decoder_num_layers + 1,
+                normalize_attention_scores=normalize_attention_scores,
+                turn_off_rop=megatron_lm_compatible,
+                version=version,
             )
             self._pre_decoder_key = "pre_decoder"
             self._post_decoder_key = "post_decoder"
@@ -289,8 +316,18 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         )
 
         if add_decoder and post_process:
-            self.tokens_head = MegatronTokenLevelHead(self.word_embeddings_weight().size(0), parallel_output)
+            self.tokens_head = MuReadout(self.word_embeddings_weight().size(0), parallel_output)
             self._tokens_head_key = 'tokens_head'
+
+    def set_input_tensor(self, input_tensor):
+        """Set input tensor to be used instead of forward()'s input.
+
+        When doing pipeline parallelism the input from the previous
+        stage comes from communication, not from the input, so the
+        model's forward_step_func won't have it. This function is thus
+        used by internal code to bypass the input provided by the
+        forward_step_func"""
+        self.input_tensor = input_tensor
 
     def forward(
         self,
@@ -304,20 +341,22 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
         set_inference_key_value_memory=False,
         inference_max_sequence_len=None,
         neighbors=None,
+        position_ids=None,
     ):
         """
         Return value is per token / per dimension (i.e., non collapsed loss value)
         """
         eod_positions = None
         retrieved_emb = None
-        if input_ids is not None and self.eod_id is not None:
+        if input_ids is not None and self.eod_id is not None and not self.megatron_lm_compatible:
+            # do not reset attention for megatron lm compatible model
             eod_positions = torch.where(input_ids == self.eod_id)
 
         if input_emb is None:
             if self.pre_process and self.add_encoder:
                 # encoder embeddings
                 if self.add_abs_position_embedding:
-                    input_position_ids = build_position_ids(input_ids)
+                    input_position_ids = position_ids
                 else:
                     input_position_ids = None
                 input_emb = self.encoder_embedding(input_ids, input_position_ids, token_type_ids=token_type_ids)
@@ -343,9 +382,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
             )
             # hidden is a tuple, (layernorm_input, layernorm_output)
             self.post_decoder.set_input_tensor(hidden)
-            # scale down the pre-decoder output by half
-            hidden = (hidden[0] * 0.5, hidden[1] * 0.5)
-            # stop passing through the gradients
             encoder_output = hidden[1].transpose(0, 1).contiguous()
 
         if self.add_encoder:
@@ -360,9 +396,6 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
                 inference_max_sequence_len=inference_max_sequence_len,
                 neighbors=neighbors,
             )
-            #  scale down the retrieved emb output
-            if retrieved_emb is not None:
-                retrieved_emb = retrieved_emb * (1 / max(1, self.num_chunked_cross_attention))
 
         if self.add_decoder:
             dec_output = self.post_decoder(
@@ -378,14 +411,21 @@ class MegatronRetrievalTokenLevelEncoderDecoderModule(MegatronModule):
             token_logits = self.tokens_head(dec_output, self.word_embeddings_weight())
 
             if labels is not None:
+                # [b, s] -> [s, b]
+                labels = labels.transpose(0, 1).contiguous()
+
                 # tensor_parallel.vocab_parallel_cross_entropy performs log_softmax and return log p(x_i|z) per token i
                 if self.fp16_cross_entropy:
                     assert token_logits.dtype == torch.half
                     tokens_loss = tensor_parallel.vocab_parallel_cross_entropy(token_logits, labels)
                 else:
                     tokens_loss = tensor_parallel.vocab_parallel_cross_entropy(token_logits.float(), labels)
+                # [s, b] -> [b, s]
+                tokens_loss = tokens_loss.transpose(0, 1).contiguous()
                 return tokens_loss
             else:
+                # [s, b, h] -> [b, s, h]
+                token_logits = token_logits.transpose(0, 1).contiguous()
                 return token_logits
 
     def state_dict_for_save_checkpoint(self, destination=None, prefix='', keep_vars=False):
