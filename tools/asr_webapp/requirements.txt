@@ -1,4 +1,5 @@
 flask
 flask-cors
 gunicorn
+setuptools
 -e git+git://github.com/NVIDIA/NeMo.git#egg=nemo_toolkit[all]
